@@ -5,17 +5,15 @@
  *
  * RESPONSIBILITIES:
  * - Open source workbooks by ID (SpreadsheetApp.openById)
- * - Iterate all sheets in a workbook
- * - Return raw 2D array of values per sheet
- * - Handle merged cells, empty rows, date/number formats
- * - Detect and skip service sheets (_FF_*, Sheet1, Служебный, Темп, DEBUG)
- * - Normalise numbers: handle comma decimal separators (Russian locale)
- * - Return structured SheetData objects for the Classifier
+ * - Iterate all sheets in each workbook
+ * - Skip service sheets (_FF_*, Sheet1, Служебный, Темп, DEBUG)
+ * - Return raw 2D arrays, normalised numbers, structured SheetData objects
+ * - Handle merged cells, empty rows, comma decimal separators (Russian locale)
+ * - Catch and log errors per sheet — never crash the whole pipeline
  *
- * ERROR HANDLING:
- * - Catch and log all errors per sheet (never crash the whole pipeline)
- * - Return null for unreadable sheets
- * - Log to FF.Debug
+ * OUTPUT STRUCTURE: Array<SheetData>
+ * SheetData = { bookId, bookName, sheetName, headers, rows }
+ * rows = Array<Object> keyed by header
  */
 
 'use strict';
@@ -25,82 +23,191 @@ var FF = FF || {};
 FF.Parser = (function() {
 
   /** Sheet names to always skip */
-  const SKIP_SHEET_PREFIXES = ['_FF_', 'Sheet'];
-  const SKIP_SHEET_NAMES = ['Служебный', 'Темп', 'DEBUG', 'Настройки'];
+  var SKIP_SHEETS = [
+    'Sheet1', 'Служебный', 'Темп', 'DEBUG', 'Log', 'Dashboard'
+  ];
+  var SKIP_PREFIX = '_FF_';
 
   /**
-   * Read all sheets from a workbook by its spreadsheet ID.
-   * @param {string} spreadsheetId
-   * @returns {Array<SheetData>} array of sheet data objects
-   *
-   * @typedef {Object} SheetData
-   * @property {string} sheetName - raw sheet name
-   * @property {string} spreadsheetId - source spreadsheet ID
-   * @property {Array<Array<*>>} rawData - 2D array of cell values
-   * @property {number} numRows - number of data rows
-   * @property {number} numCols - number of columns
-   * @property {string|null} reportType - filled by Classifier later
+   * Read all source workbooks defined in config.
+   * @param {Object} config - loaded FF.Config object
+   * @returns {Array} Array of SheetData objects
    */
-  function readBook(spreadsheetId) {
-    // TODO: implement
-    // 1. SpreadsheetApp.openById(spreadsheetId)
-    // 2. ss.getSheets()
-    // 3. Filter out skip sheets
-    // 4. For each sheet: readSheet(sheet)
-    // 5. Return array of SheetData
-    return [];
+  function readBook(config) {
+    var result = [];
+    var bookIds = config.sourceBookIds || [];
+
+    // If no external books configured, read the active spreadsheet
+    if (bookIds.length === 0) {
+      bookIds = [SpreadsheetApp.getActiveSpreadsheet().getId()];
+    }
+
+    bookIds.forEach(function(bookId) {
+      bookId = String(bookId).trim();
+      if (!bookId) return;
+      try {
+        var ss       = SpreadsheetApp.openById(bookId);
+        var bookName = ss.getName();
+        var sheets   = ss.getSheets();
+        FF.Debug.log('INFO', 'Parser', 'Reading book: ' + bookName + ' (' + sheets.length + ' sheets)');
+
+        sheets.forEach(function(sheet) {
+          var sheetData = _readSheet(sheet, bookId, bookName);
+          if (sheetData) result.push(sheetData);
+        });
+      } catch(e) {
+        FF.Debug.log('ERROR', 'Parser', 'Cannot open book: ' + bookId, e.message);
+      }
+    });
+
+    FF.Debug.log('INFO', 'Parser', 'Total SheetData objects: ' + result.length);
+    return result;
   }
 
   /**
-   * Read a single sheet and return its raw data.
+   * Read and normalise a single sheet.
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
-   * @param {string} spreadsheetId
-   * @returns {SheetData|null}
+   * @param {string} bookId
+   * @param {string} bookName
+   * @returns {Object|null} SheetData or null if sheet should be skipped
    */
-  function readSheet(sheet, spreadsheetId) {
-    // TODO: implement
-    // 1. sheet.getDataRange().getValues()
-    // 2. Trim trailing empty rows and columns
-    // 3. Normalise numeric strings (replace comma decimal separator)
-    // 4. Return SheetData object
-    return null;
+  function _readSheet(sheet, bookId, bookName) {
+    var sheetName = sheet.getName();
+
+    // Skip service sheets
+    if (_shouldSkip(sheetName)) {
+      FF.Debug.log('INFO', 'Parser', 'Skipping sheet: ' + sheetName);
+      return null;
+    }
+
+    try {
+      var lastRow = sheet.getLastRow();
+      var lastCol = sheet.getLastColumn();
+
+      if (lastRow < 2 || lastCol < 1) {
+        FF.Debug.log('WARN', 'Parser', 'Empty sheet: ' + sheetName);
+        return null;
+      }
+
+      // Read all values
+      var rawValues = sheet.getRange(1, 1, lastRow, lastCol).getValues();
+
+      // First non-empty row = headers
+      var headerRowIdx = _findHeaderRow(rawValues);
+      if (headerRowIdx < 0) {
+        FF.Debug.log('WARN', 'Parser', 'No header row found in: ' + sheetName);
+        return null;
+      }
+
+      var headers = rawValues[headerRowIdx].map(function(h) {
+        return String(h).trim();
+      });
+
+      // Parse data rows
+      var rows = [];
+      for (var r = headerRowIdx + 1; r < rawValues.length; r++) {
+        var rawRow = rawValues[r];
+        // Skip completely empty rows
+        if (_isEmptyRow(rawRow)) continue;
+
+        var rowObj = {};
+        headers.forEach(function(header, colIdx) {
+          if (!header) return;
+          rowObj[header] = _normaliseValue(rawRow[colIdx]);
+        });
+        rows.push(rowObj);
+      }
+
+      if (rows.length === 0) {
+        FF.Debug.log('WARN', 'Parser', 'No data rows in: ' + sheetName);
+        return null;
+      }
+
+      FF.Debug.log('INFO', 'Parser', sheetName + ': ' + rows.length + ' rows, ' + headers.filter(Boolean).length + ' cols');
+
+      return {
+        bookId:    bookId,
+        bookName:  bookName,
+        sheetName: sheetName,
+        headers:   headers.filter(Boolean),
+        rows:      rows
+      };
+
+    } catch(e) {
+      FF.Debug.log('ERROR', 'Parser', 'Error reading sheet: ' + sheetName, e.message);
+      return null;
+    }
   }
 
   /**
-   * Check if a sheet should be skipped.
-   * @param {string} name
-   * @returns {boolean}
+   * Find the first row index that looks like a header
+   * (has at least 2 non-empty string cells).
+   * @param {Array[][]} values
+   * @returns {number} row index or -1
    */
-  function shouldSkip(name) {
-    // TODO: implement
-    return false;
+  function _findHeaderRow(values) {
+    for (var i = 0; i < Math.min(values.length, 10); i++) {
+      var row = values[i];
+      var textCells = row.filter(function(cell) {
+        return cell !== '' && cell !== null && isNaN(Number(cell));
+      });
+      if (textCells.length >= 2) return i;
+    }
+    return 0; // fallback: row 0
   }
 
   /**
    * Normalise a cell value:
-   * - Numeric strings with comma decimal -> convert to number
-   * - Date strings -> Date objects
-   * - Trim strings
-   * @param {*} value
+   * - Dates → ISO string
+   * - Strings with comma decimals → numbers
+   * - Trimmed strings
+   * @param {*} val
    * @returns {*}
    */
-  function normaliseCell(value) {
-    // TODO: implement
-    return value;
+  function _normaliseValue(val) {
+    if (val === null || val === undefined || val === '') return null;
+
+    // Date objects
+    if (val instanceof Date) {
+      return Utilities.formatDate(val, 'Europe/Moscow', 'yyyy-MM-dd');
+    }
+
+    // Numbers
+    if (typeof val === 'number') return val;
+
+    // Strings
+    var str = String(val).trim();
+    if (str === '') return null;
+
+    // Russian number format: "1 234,56" or "1234,56"
+    var numStr = str.replace(/\s/g, '').replace(',', '.');
+    var num = parseFloat(numStr);
+    if (!isNaN(num) && numStr.match(/^-?[\d.]+$/)) return num;
+
+    return str;
   }
 
   /**
-   * Find the first row that looks like a data header.
-   * Skips empty rows and service rows at the top.
-   * @param {Array<Array<*>>} data
-   * @returns {number} 0-based row index
+   * Determine if a row is completely empty.
+   * @param {Array} row
+   * @returns {boolean}
    */
-  function findHeaderRow(data) {
-    // TODO: implement
-    // Look for row with mostly string values
-    return 0;
+  function _isEmptyRow(row) {
+    return row.every(function(cell) {
+      return cell === null || cell === undefined || cell === '';
+    });
   }
 
-  return { readBook, readSheet, shouldSkip, normaliseCell, findHeaderRow };
+  /**
+   * Determine if a sheet should be skipped.
+   * @param {string} sheetName
+   * @returns {boolean}
+   */
+  function _shouldSkip(sheetName) {
+    if (sheetName.indexOf(SKIP_PREFIX) === 0) return true;
+    return SKIP_SHEETS.indexOf(sheetName) >= 0;
+  }
+
+  return { readBook };
 
 })();
