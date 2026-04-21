@@ -10,16 +10,6 @@
  * - Used by Dashboard, KPI, and Email modules to decide what to render
  *
  * INVARIANT: Never show a block if required data is missing (Zero Fabrication)
- *
- * BLOCK DEFINITIONS:
- * Each block has:
- *   - id: unique identifier
- *   - name: display name
- *   - role: which dashboards use it (CEO, CFO, OPS, GENERAL, CUSTOM)
- *   - requiredTypes: array of REPORT_TYPE enums needed
- *   - description: what metrics this block shows
- *   - isAvailable: computed at runtime
- *   - missingTypes: list of missing report types (for debug)
  */
 
 'use strict';
@@ -29,123 +19,139 @@ var FF = FF || {};
 FF.Registry = (function() {
 
   /**
-   * Master list of all analytics blocks.
-   * TODO: expand with all blocks from docs/03-kpi-catalog.md
-   *
-   * @type {Array<BlockDefinition>}
-   * @typedef {Object} BlockDefinition
-   * @property {string} id
-   * @property {string} name
-   * @property {string[]} roles - ['CEO','CFO','OPS','GENERAL','CUSTOM']
-   * @property {string[]} requiredTypes - REPORT_TYPE values
-   * @property {string} description
+   * Master block catalogue.
+   * Each block defines which report types it needs to be rendered.
+   * If ANY required type is missing, isAvailable = false.
    */
-  const BLOCK_DEFINITIONS = [
+  var BLOCK_CATALOGUE = [
     {
-      id: 'revenue_overview',
-      name: 'Обзор выручки',
-      roles: ['CEO', 'GENERAL'],
-      requiredTypes: ['SALES_PERIOD'],
-      description: 'Total revenue, MoM growth, vs plan'
+      id: 'revenue_daily',
+      label: 'Выручка за день',
+      category: 'revenue',
+      requiredTypes: ['SALES_SUMMARY'],
+      metrics: ['total_revenue', 'avg_check', 'guests_count']
     },
     {
-      id: 'pl_summary',
-      name: 'P&L сводка',
-      roles: ['CEO', 'CFO'],
-      requiredTypes: ['BDR', 'PL_FACT'],
-      description: 'Revenue, COGS, Gross Profit, EBITDA, Net Profit vs budget'
+      id: 'revenue_by_category',
+      label: 'Выручка по категориям',
+      category: 'revenue',
+      requiredTypes: ['SALES_BY_CATEGORY'],
+      metrics: ['revenue_by_category']
     },
     {
-      id: 'cashflow_summary',
-      name: 'Движение денежных средств',
-      roles: ['CFO'],
-      requiredTypes: ['BDDS'],
-      description: 'Cash in/out waterfall, closing balance'
+      id: 'top_dishes',
+      label: 'ТОП блюд',
+      category: 'menu',
+      requiredTypes: ['SALES_BY_DISH'],
+      metrics: ['top_dishes_by_revenue', 'top_dishes_by_qty']
     },
     {
-      id: 'balance_snapshot',
-      name: 'Баланс',
-      roles: ['CFO'],
-      requiredTypes: ['BALANCE'],
-      description: 'Assets, liabilities, equity snapshot'
+      id: 'hourly_traffic',
+      label: 'Почасовой трафик',
+      category: 'operations',
+      requiredTypes: ['SALES_BY_HOUR'],
+      metrics: ['peak_hours', 'revenue_by_hour']
     },
     {
-      id: 'avg_check_kpi',
-      name: 'Средний чек',
-      roles: ['OPS', 'CEO'],
-      requiredTypes: ['AVG_CHECK'],
-      description: 'Average bill with trend and benchmark'
+      id: 'staff_performance',
+      label: 'Эффективность персонала',
+      category: 'staff',
+      requiredTypes: ['SALES_BY_WAITER'],
+      metrics: ['revenue_per_waiter', 'checks_per_waiter']
     },
     {
-      id: 'food_cost_kpi',
-      name: 'Food Cost %',
-      roles: ['OPS', 'CFO'],
-      requiredTypes: ['COGS', 'SALES_PERIOD'],
-      description: 'Food cost as % of revenue with alert threshold'
+      id: 'writeoffs_analysis',
+      label: 'Анализ списаний',
+      category: 'costs',
+      requiredTypes: ['WRITEOFFS'],
+      metrics: ['writeoff_total', 'writeoff_by_category']
     },
     {
-      id: 'labor_cost_kpi',
-      name: 'Labor Cost %',
-      roles: ['OPS', 'CFO'],
-      requiredTypes: ['PAYROLL', 'SALES_PERIOD'],
-      description: 'Labor cost as % of revenue'
+      id: 'cash_summary',
+      label: 'Движение средств',
+      category: 'finance',
+      requiredTypes: ['CASH_FLOW'],
+      metrics: ['cash_in', 'cash_out', 'cash_balance']
     },
     {
-      id: 'inventory_turnover',
-      name: 'Оборачиваемость запасов',
-      roles: ['OPS'],
-      requiredTypes: ['INVENTORY', 'COGS'],
-      description: 'Inventory turnover rate and days'
+      id: 'inventory_balance',
+      label: 'Остатки на складе',
+      category: 'inventory',
+      requiredTypes: ['INVENTORY'],
+      metrics: ['stock_balance', 'low_stock_items']
     },
     {
-      id: 'revenue_forecast',
-      name: 'Прогноз выручки',
-      roles: ['CEO', 'CFO'],
-      requiredTypes: ['SALES_PERIOD'],  // requires 3+ months of data
-      description: 'Revenue forecast for next 30/90 days (requires 3+ months history)'
+      id: 'delivery_kpi',
+      label: 'KPI доставки',
+      category: 'delivery',
+      requiredTypes: ['DELIVERY'],
+      metrics: ['delivery_revenue', 'delivery_orders_count']
     },
-    // TODO: add remaining blocks per docs/03-kpi-catalog.md
+    {
+      id: 'loyalty_overview',
+      label: 'Лояльность гостей',
+      category: 'loyalty',
+      requiredTypes: ['LOYALTY'],
+      metrics: ['new_guests', 'returning_guests', 'loyalty_revenue_share']
+    }
   ];
 
   /**
-   * Build the list of available blocks based on classified sheets.
-   * @param {Array<{type: string, sheetName: string}>} classifiedSheets
-   * @returns {Array<BlockDescriptor>}
-   *
-   * @typedef {Object} BlockDescriptor
-   * @property {string} id
-   * @property {string} name
-   * @property {string[]} roles
-   * @property {boolean} isAvailable
-   * @property {string[]} missingTypes
-   * @property {string} description
+   * Build the list of available blocks given classified sheet data.
+   * @param {Array} classifiedSheets - output from FF.Classifier.classify()
+   * @returns {Array} Array of BlockDescriptor with isAvailable flag
    */
   function buildAvailableBlocks(classifiedSheets) {
-    // TODO: implement
-    // 1. Extract set of available report types from classifiedSheets
-    // 2. For each block in BLOCK_DEFINITIONS:
-    //    - Check if all requiredTypes are in available types
-    //    - Set isAvailable = true/false
-    //    - Set missingTypes = types that are absent
-    // 3. Return array of BlockDescriptor
-    return BLOCK_DEFINITIONS.map(b => ({
-      ...b,
-      isAvailable: false,
-      missingTypes: b.requiredTypes
-    }));
+    // Collect all present report types
+    var presentTypes = {};
+    classifiedSheets.forEach(function(sd) {
+      if (sd.reportType && sd.reportType !== 'UNKNOWN') {
+        presentTypes[sd.reportType] = true;
+      }
+    });
+
+    var available = 0;
+    var blocks = BLOCK_CATALOGUE.map(function(block) {
+      var isAvailable = block.requiredTypes.every(function(rt) {
+        return !!presentTypes[rt];
+      });
+      if (isAvailable) available++;
+      return {
+        id:            block.id,
+        label:         block.label,
+        category:      block.category,
+        requiredTypes: block.requiredTypes,
+        metrics:       block.metrics,
+        isAvailable:   isAvailable
+      };
+    });
+
+    FF.Debug.log('INFO', 'Registry',
+      'Blocks available: ' + available + '/' + blocks.length +
+      ' | Present types: ' + Object.keys(presentTypes).join(', '));
+
+    return blocks;
   }
 
   /**
-   * Get blocks available for a specific role.
-   * @param {Array<BlockDescriptor>} blocks
-   * @param {string} role - 'CEO' | 'CFO' | 'OPS' | 'GENERAL' | 'CUSTOM'
-   * @returns {Array<BlockDescriptor>} only available blocks for this role
+   * Filter to only available blocks.
+   * @param {Array} blocks - output from buildAvailableBlocks()
+   * @returns {Array}
    */
-  function getBlocksForRole(blocks, role) {
-    // TODO: implement
-    return blocks.filter(b => b.isAvailable && b.roles.includes(role));
+  function getAvailable(blocks) {
+    return blocks.filter(function(b) { return b.isAvailable; });
   }
 
-  return { buildAvailableBlocks, getBlocksForRole, BLOCK_DEFINITIONS };
+  /**
+   * Get a block descriptor by ID.
+   * @param {Array} blocks
+   * @param {string} blockId
+   * @returns {Object|null}
+   */
+  function getById(blocks, blockId) {
+    return blocks.find(function(b) { return b.id === blockId; }) || null;
+  }
+
+  return { buildAvailableBlocks, getAvailable, getById, BLOCK_CATALOGUE };
 
 })();
