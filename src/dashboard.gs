@@ -1,11 +1,10 @@
 // @ts-check
 /**
  * dashboard.gs — Formula Finance v1.0.0
- * Renders the main dashboard sheet with all KPI blocks.
- * Reads available blocks from Registry, delegates rendering to KPI module.
+ * Orchestrates the main Dashboard sheet.
+ * Clears the sheet, writes the header, then delegates KPI rendering to FF.KPI.
  *
  * NAMESPACE: FF.Dashboard
- * SHEET: CONFIG.SHEETS.DASHBOARD
  */
 
 'use strict';
@@ -14,64 +13,111 @@ var FF = FF || {};
 
 FF.Dashboard = (function() {
 
+  var BG_MAIN    = '#0d0d1a';
+  var FG_TITLE   = '#ffffff';
+  var FG_SUB     = '#a0aec0';
+  var BG_HEADER  = '#1a1a2e';
+
   /**
-   * Render all dashboard blocks onto the dashboard sheet.
-   * @param {Object} config - loaded configuration
-   * @param {Object[]} blocks - available KPI blocks from Registry
-   * @param {Object} metrics - classified metrics data
+   * Render the full dashboard.
+   * Called from main.gs runAll().
+   * @param {Object} config
+   * @param {Array}  blocks          - from FF.Registry.buildAvailableBlocks()
+   * @param {Array}  classifiedSheets - from FF.Classifier.classify()
    */
-  function renderAll(config, blocks, metrics) {
-    // TODO: implement
-    // 1. Get or create dashboard sheet
-    // 2. Clear existing content
-    // 3. Set up header row
-    // 4. For each block, call FF.KPI.renderCard()
-    // 5. Apply formatting / column widths
+  function renderAll(config, blocks, classifiedSheets) {
+    FF.Debug.log('INFO', 'Dashboard', 'renderAll started');
+    var sheet = getSheet(config);
+
+    clearDashboard(sheet);
+    writeHeader(sheet, config, blocks);
+    applyLayout(sheet);
+
+    // Delegate KPI card rendering
+    FF.KPI.renderAll(sheet, blocks, classifiedSheets, config);
+
+    // Freeze header rows
+    sheet.setFrozenRows(2);
+
+    FF.Debug.log('INFO', 'Dashboard', 'renderAll complete');
+    FF.Menu.toast('Дашборд обновлён');
   }
 
   /**
-   * Get or create the dashboard sheet.
+   * Get or create the Dashboard sheet.
    * @param {Object} config
    * @returns {GoogleAppsScript.Spreadsheet.Sheet}
    */
   function getSheet(config) {
-    // TODO: implement
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var ss        = SpreadsheetApp.getActiveSpreadsheet();
     var sheetName = (config && config.sheets && config.sheets.dashboard) || 'Dashboard';
-    var sheet = ss.getSheetByName(sheetName);
+    var sheet     = ss.getSheetByName(sheetName);
     if (!sheet) {
-      sheet = ss.insertSheet(sheetName);
+      sheet = ss.insertSheet(sheetName, 0); // insert as first sheet
+      FF.Debug.log('INFO', 'Dashboard', 'Created sheet: ' + sheetName);
     }
     return sheet;
   }
 
   /**
-   * Clear dashboard content while preserving formatting.
+   * Clear dashboard content (preserve the sheet itself).
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
    */
   function clearDashboard(sheet) {
-    // TODO: implement
     sheet.clearContents();
+    sheet.clearFormats();
+    // Reset tab color
+    sheet.setTabColor('#0f3460');
+    sheet.setTabColorObject(SpreadsheetApp.newColor().setRgbColor('#0f3460').build());
   }
 
   /**
-   * Write dashboard header (title, last updated timestamp).
+   * Write dashboard title row and subtitle row.
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
    * @param {Object} config
+   * @param {Array}  blocks
    */
-  function writeHeader(sheet, config) {
-    // TODO: implement
-    sheet.getRange(1, 1).setValue('Formula Finance — Dashboard');
-    sheet.getRange(1, 2).setValue(new Date());
+  function writeHeader(sheet, config, blocks) {
+    var companyName = (config && config.companyName) || 'Formula Finance';
+    var available   = blocks.filter(function(b) { return b.isAvailable; }).length;
+    var ts          = Utilities.formatDate(new Date(), 'Europe/Moscow', 'dd.MM.yyyy HH:mm');
+
+    // Row 1: Title
+    var titleRange = sheet.getRange(1, 1, 1, 10);
+    titleRange.merge();
+    titleRange.setValue('📊 ' + companyName + ' — Дашборд');
+    titleRange.setBackground(BG_HEADER);
+    titleRange.setFontColor(FG_TITLE);
+    titleRange.setFontSize(16);
+    titleRange.setFontWeight('bold');
+    titleRange.setVerticalAlignment('middle');
+    sheet.setRowHeight(1, 40);
+
+    // Row 2: Subtitle (last updated + blocks count)
+    var subRange = sheet.getRange(2, 1, 1, 10);
+    subRange.merge();
+    subRange.setValue('Обновлено: ' + ts + '  | Блоков активно: ' + available);
+    subRange.setBackground(BG_HEADER);
+    subRange.setFontColor(FG_SUB);
+    subRange.setFontSize(9);
+    subRange.setVerticalAlignment('middle');
+    sheet.setRowHeight(2, 22);
+
+    // Background for all used area
+    var dataRange = sheet.getRange(3, 1, 200, 10);
+    dataRange.setBackground(BG_MAIN);
   }
 
   /**
-   * Apply column widths and row heights for the dashboard layout.
+   * Apply column widths for the standard KPI card layout.
+   * Cards: label(col A, 160px) + value(col B, 140px) × 3 cards = 6 cols
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
    */
   function applyLayout(sheet) {
-    // TODO: implement
-    // Standard card layout: 3 columns per card group
+    var widths = [160, 140, 20, 160, 140, 20, 160, 140, 20, 80];
+    widths.forEach(function(w, i) {
+      sheet.setColumnWidth(i + 1, w);
+    });
   }
 
   return { renderAll, getSheet, clearDashboard, writeHeader, applyLayout };
