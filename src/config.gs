@@ -4,23 +4,24 @@
  * Reads and writes configuration from the _FF_CONFIG sheet.
  *
  * CONFIG SHEET STRUCTURE (_FF_CONFIG):
- * Row 1: Header
- * Rows 2+: Key | Value pairs
+ * Row 1: Header (Key | Value)
+ * Rows 2+: key | value pairs
  *
- * Key config values:
- * - sourceBookIds: comma-separated Spreadsheet IDs to read data from
- * - companyName: name to display in dashboards and email headers
- * - ceoEmails: comma-separated email addresses for CEO reports
- * - cfoEmails: comma-separated email addresses for CFO reports
- * - opsEmails: comma-separated email addresses for Ops reports
- * - generalEmails: comma-separated email addresses for General reports
- * - customEmails: comma-separated email addresses for Custom reports
- * - triggerDaily: true/false — enable daily trigger
- * - triggerWeekly: true/false — enable weekly trigger
- * - triggerMonthly: true/false — enable monthly trigger
- * - currency: currency symbol (default: ₽)
- * - locale: ru/en
- * - timezone: timezone string (e.g., Europe/Moscow)
+ * Supported keys:
+ * - sourceBookIds     : comma-separated Spreadsheet IDs
+ * - companyName       : display name
+ * - ceoEmails         : comma-separated
+ * - cfoEmails         : comma-separated
+ * - opsEmails         : comma-separated
+ * - generalEmails     : comma-separated
+ * - currency          : default ₽
+ * - locale            : ru | en
+ * - timezone          : e.g. Europe/Moscow
+ * - triggerDaily      : true/false
+ * - triggerWeekly     : true/false
+ * - triggerMonthly    : true/false
+ * - dashboardSheet    : sheet name for dashboard
+ * - logSheet          : sheet name for log
  */
 
 'use strict';
@@ -29,51 +30,163 @@ var FF = FF || {};
 
 FF.Config = (function() {
 
-  const CONFIG_SHEET_NAME = '_FF_CONFIG';
+  var CONFIG_SHEET_NAME = '_FF_CONFIG';
+
+  /** Default values used when a key is absent from the config sheet */
+  var DEFAULTS = {
+    companyName:    'Formula Finance',
+    currency:       '₽',
+    locale:         'ru',
+    timezone:       'Europe/Moscow',
+    triggerDaily:   false,
+    triggerWeekly:  false,
+    triggerMonthly: false,
+    dashboardSheet: 'Dashboard',
+    logSheet:       'Log',
+    sourceBookIds:  [],
+    ceoEmails:      [],
+    cfoEmails:      [],
+    opsEmails:      [],
+    generalEmails:  []
+  };
 
   /**
    * Load all config values from the _FF_CONFIG sheet.
-   * Returns a config object with defaults for missing values.
-   * @returns {Object}
+   * @returns {Object} config object
    */
   function load() {
-    // TODO: implement
-    // 1. Get or create _FF_CONFIG sheet
-    // 2. Read Key-Value pairs
-    // 3. Parse sourceBookIds into array
-    // 4. Parse email lists into arrays
-    // 5. Return config object with defaults
-    return {};
+    var ss    = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!sheet) {
+      FF.Debug && FF.Debug.log('WARN', 'Config', 'Sheet "' + CONFIG_SHEET_NAME + '" not found — using defaults');
+      return _buildConfig({});
+    }
+
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return _buildConfig({});
+
+    var data = sheet.getRange(2, 1, lastRow - 1, 2).getValues();
+    var raw  = {};
+    data.forEach(function(row) {
+      var key = String(row[0]).trim();
+      var val = String(row[1]).trim();
+      if (key) raw[key] = val;
+    });
+
+    return _buildConfig(raw);
   }
 
   /**
-   * Save a single config value to the _FF_CONFIG sheet.
+   * Build a typed config object from raw key/value pairs.
+   * @param {Object} raw
+   * @returns {Object}
+   */
+  function _buildConfig(raw) {
+    return {
+      companyName:    raw.companyName    || DEFAULTS.companyName,
+      currency:       raw.currency       || DEFAULTS.currency,
+      locale:         raw.locale         || DEFAULTS.locale,
+      timezone:       raw.timezone       || DEFAULTS.timezone,
+      triggerDaily:   _bool(raw.triggerDaily,   DEFAULTS.triggerDaily),
+      triggerWeekly:  _bool(raw.triggerWeekly,  DEFAULTS.triggerWeekly),
+      triggerMonthly: _bool(raw.triggerMonthly, DEFAULTS.triggerMonthly),
+      sheets: {
+        dashboard: raw.dashboardSheet || DEFAULTS.dashboardSheet,
+        log:       raw.logSheet       || DEFAULTS.logSheet
+      },
+      sourceBookIds:  _csvArray(raw.sourceBookIds),
+      emails: {
+        ceo:     _csvArray(raw.ceoEmails),
+        cfo:     _csvArray(raw.cfoEmails),
+        ops:     _csvArray(raw.opsEmails),
+        general: _csvArray(raw.generalEmails)
+      }
+    };
+  }
+
+  /**
+   * Save a single key/value pair to the config sheet.
+   * Creates the sheet and writes a header if it doesn’t exist.
    * @param {string} key
    * @param {string} value
    */
-  function set(key, value) {
-    // TODO: implement
+  function save(key, value) {
+    var ss    = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(CONFIG_SHEET_NAME);
+      sheet.appendRow(['Key', 'Value']);
+      sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+    }
+
+    // Search for existing key
+    var lastRow = sheet.getLastRow();
+    if (lastRow >= 2) {
+      var keys = sheet.getRange(2, 1, lastRow - 1, 1).getValues();
+      for (var i = 0; i < keys.length; i++) {
+        if (String(keys[i][0]).trim() === key) {
+          sheet.getRange(i + 2, 2).setValue(value);
+          return;
+        }
+      }
+    }
+    // Key not found — append new row
+    sheet.appendRow([key, value]);
   }
 
   /**
-   * Get or create the _FF_CONFIG sheet.
-   * If it doesn't exist, create it with default structure.
-   * @returns {GoogleAppsScript.Spreadsheet.Sheet}
+   * Open (or create) the config sheet and make it active.
    */
-  function getOrCreateSheet() {
-    // TODO: implement
-    // - Check if _FF_CONFIG exists
-    // - If not, create with headers and default values
+  function openSheet() {
+    var ss    = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(CONFIG_SHEET_NAME);
+      _writeDefaultSheet(sheet);
+    }
+    ss.setActiveSheet(sheet);
   }
 
   /**
-   * Open the settings UI (sidebar or dialog).
-   * Shows current config in editable form.
+   * Populate the config sheet with default key/value rows.
+   * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet
    */
-  function openSettingsUI() {
-    // TODO: implement using HtmlService
+  function _writeDefaultSheet(sheet) {
+    var rows = [
+      ['Key', 'Value'],
+      ['companyName',    'Formula Finance'],
+      ['currency',       '₽'],
+      ['locale',         'ru'],
+      ['timezone',       'Europe/Moscow'],
+      ['dashboardSheet', 'Dashboard'],
+      ['logSheet',       'Log'],
+      ['sourceBookIds',  ''],
+      ['ceoEmails',      ''],
+      ['cfoEmails',      ''],
+      ['opsEmails',      ''],
+      ['generalEmails',  ''],
+      ['triggerDaily',   'false'],
+      ['triggerWeekly',  'false'],
+      ['triggerMonthly', 'false']
+    ];
+    sheet.clearContents();
+    sheet.getRange(1, 1, rows.length, 2).setValues(rows);
+    sheet.getRange(1, 1, 1, 2).setFontWeight('bold');
+    sheet.autoResizeColumns(1, 2);
   }
 
-  return { load, set, getOrCreateSheet, openSettingsUI };
+  // --- helpers ---
+
+  function _bool(val, def) {
+    if (val === undefined || val === null || val === '') return def;
+    return String(val).trim().toLowerCase() === 'true';
+  }
+
+  function _csvArray(val) {
+    if (!val || String(val).trim() === '') return [];
+    return String(val).split(',').map(function(s) { return s.trim(); }).filter(Boolean);
+  }
+
+  return { load, save, openSheet };
 
 })();
