@@ -22,6 +22,8 @@ FF.Menu = (function() {
     SETTINGS:     '⚙️ Настройки',
     COVERAGE_LOG: '📝 Лог покрытия',
     CLEAR_LOG:    '🗑️ Очистить лог',
+    RUN_TESTS:    '🧪 Запустить тесты',
+    RESET_CACHE:  '♻️ Сбросить кеш парсера',
     ABOUT:        'ℹ️ О продукте'
   };
 
@@ -38,6 +40,9 @@ FF.Menu = (function() {
       .addItem(LABELS.SETTINGS,     'menuOpenSettings')
       .addItem(LABELS.COVERAGE_LOG, 'menuOpenCoverageLog')
       .addItem(LABELS.CLEAR_LOG,    'menuClearLog')
+      .addSeparator()
+      .addItem(LABELS.RUN_TESTS,    'menuRunTests')
+      .addItem(LABELS.RESET_CACHE,  'menuResetCache')
       .addSeparator()
       .addItem(LABELS.ABOUT,        'menuAbout')
       .addToUi();
