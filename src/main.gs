@@ -2,7 +2,7 @@
 /**
  * main.gs — Formula Finance v1.0.0
  * Entry points for all user-facing functions.
- * Wires together all modules: Parser -> Classifier -> Registry -> KPI/Dashboard -> Email
+ * Wires together all modules: Parser -> Classifier -> Registry -> Dashboard/KPI -> Email
  *
  * NAMESPACE: FF (all modules attached to this global object)
  * RUNTIME: Apps Script V8
@@ -39,40 +39,46 @@ function onOpen() {
 
 /**
  * runAll() — полный конвейер обновления.
- * Config -> Parse -> Classify -> Registry -> KPI -> Dashboard -> Debug
+ * Config -> Parse -> Classify -> Registry -> Dashboard+KPI -> HealthCheck
  */
 function runAll() {
-  var cfg = FF.Config.load();
-  FF.Debug.log('runAll started', 'INFO');
+  var started = Date.now();
+  var cfg     = FF.Config.load();
+  FF.Debug.log('INFO', 'main', 'runAll started');
 
   try {
-    // 1. Парсинг книги
+    // 1. Парсинг книг
     var raw = FF.Parser.readBook(cfg);
-    FF.Debug.log('Parser: ' + raw.length + ' sheets', 'INFO');
+    FF.Debug.log('INFO', 'main', 'Parser: ' + raw.length + ' sheets');
 
-    // 2. Классификация строк
-    var rows = FF.Classifier.classifyAll(raw, cfg);
-    FF.Debug.log('Classifier: ' + rows.length + ' rows', 'INFO');
+    // 2. Классификация (мутирует массив, добавляя reportType/confidence)
+    var classified = FF.Classifier.classify(raw);
+    FF.Debug.log('INFO', 'main', 'Classifier: ' + classified.length + ' classified');
 
-    // 3. Реестр операций
-    FF.Registry.build(rows, cfg);
-    FF.Debug.log('Registry: built', 'INFO');
+    // 3. Реестр доступных блоков
+    var blocks = FF.Registry.buildAvailableBlocks(classified);
+    var availableBlocks = blocks.filter(function(b) { return b.isAvailable; }).length;
+    FF.Debug.log('INFO', 'main', 'Registry: ' + availableBlocks + '/' + blocks.length + ' blocks available');
 
-    // 4. KPI
-    FF.KPI.renderAll(cfg);
-    FF.Debug.log('KPI: rendered', 'INFO');
+    // 4. Dashboard + KPI (renderAll сам вызывает FF.KPI.renderAll)
+    FF.Dashboard.renderAll(cfg, blocks, classified);
+    FF.Debug.log('INFO', 'main', 'Dashboard+KPI rendered');
 
-    // 5. Дашборды
-    FF.Dashboard.renderAll(cfg);
-    FF.Debug.log('Dashboard: rendered', 'INFO');
-
-    // 6. Health-check
-    FF.Debug.writeHealthCheck(cfg);
+    // 5. Health-check
+    var durationMs = Date.now() - started;
+    FF.Debug.writeHealthCheck(cfg, {
+      status:          'ok',
+      sheetsRead:      raw.length,
+      sheetsClassified:classified.length,
+      blocksAvailable: availableBlocks,
+      blocksTotal:     blocks.length,
+      durationMs:      durationMs
+    });
 
     FF.Menu.toast('Formula Finance обновлён', 'OK', 4);
   } catch (e) {
-    FF.Debug.log('runAll FATAL: ' + e.message, 'ERROR');
-    FF.Menu.alert('Ошибка обновления', e.message);
+    FF.Debug.log('ERROR', 'main', 'runAll FATAL: ' + e.message, { stack: e.stack });
+    FF.Menu.alert('Ошибка обновления: ' + e.message);
     throw e;
   }
 }
@@ -84,8 +90,8 @@ function runAll() {
 /** Меню → «Обновить дашборд» */
 function menuUpdateAll() {
   var confirmed = FF.Menu.confirm(
-    'Обновить дашборд?',
-    'Запустить полный пересчёт данных?'
+    'Запустить полный пересчёт данных?',
+    'Обновить дашборд?'
   );
   if (confirmed) runAll();
 }
@@ -94,28 +100,32 @@ function menuUpdateAll() {
 function menuSendReports() {
   var cfg = FF.Config.load();
   try {
-    FF.Email.sendAll(cfg);
+    // Чтобы отчёты ссылались на актуальные блоки, пересобираем их быстро
+    var raw        = FF.Parser.readBook(cfg);
+    var classified = FF.Classifier.classify(raw);
+    var blocks     = FF.Registry.buildAvailableBlocks(classified);
+    FF.Email.sendAll(cfg, blocks, classified);
     FF.Menu.toast('Отчёты отправлены', 'Email', 4);
   } catch (e) {
-    FF.Debug.log('menuSendReports error: ' + e.message, 'ERROR');
-    FF.Menu.alert('Ошибка рассылки', e.message);
+    FF.Debug.log('ERROR', 'main', 'menuSendReports error: ' + e.message);
+    FF.Menu.alert('Ошибка рассылки: ' + e.message);
   }
 }
 
 /** Меню → «Настройки» */
 function menuOpenSettings() {
   var cfg = FF.Config.load();
-  var ui = SpreadsheetApp.getUi();
+  var ui  = SpreadsheetApp.getUi();
+  var current = (cfg.sheets && cfg.sheets.dashboard) || '_FF_DASHBOARD';
   var result = ui.prompt(
     'Настройки',
-    'Введите имя листа с данными (текущий: ' + cfg.dataSheetName + '):',
+    'Имя листа дашборда (текущий: ' + current + '):',
     ui.ButtonSet.OK_CANCEL
   );
   if (result.getSelectedButton() === ui.Button.OK) {
-    var newSheet = result.getResponseText().trim();
-    if (newSheet) {
-      cfg.dataSheetName = newSheet;
-      FF.Config.save(cfg);
+    var newName = result.getResponseText().trim();
+    if (newName) {
+      FF.Config.save('dashboardSheet', newName);
       FF.Menu.toast('Настройки сохранены', 'Config', 3);
     }
   }
@@ -126,9 +136,45 @@ function menuOpenCoverageLog() {
   var cfg = FF.Config.load();
   try {
     var report = FF.Debug.getCoverageReport(cfg);
-    FF.Menu.alert('Лог покрытия', report);
+    FF.Menu.alert(report, 'Лог покрытия');
   } catch (e) {
-    FF.Menu.alert('Ошибка', e.message);
+    FF.Menu.alert('Ошибка: ' + e.message);
+  }
+}
+
+/** Меню → «Очистить лог» */
+function menuClearLog() {
+  var cfg = FF.Config.load();
+  var confirmed = FF.Menu.confirm('Очистить лист лога?', 'Очистка лога');
+  if (!confirmed) return;
+  try {
+    FF.Debug.clearLog(cfg);
+    FF.Menu.toast('Лог очищен', 'Debug', 3);
+  } catch (e) {
+    FF.Menu.alert('Ошибка: ' + e.message);
+  }
+}
+
+/** Меню → «Запустить тесты» */
+function menuRunTests() {
+  try {
+    var result = FF.Tests.runAll();
+    var title  = result.failed === 0 ? '✅ Все тесты пройдены' : '⚠️ Есть падения';
+    var msg    = 'Passed: ' + result.passed + '  |  Failed: ' + result.failed +
+                 '\n\nПодробности — в листе _FF_TESTS.';
+    FF.Menu.alert(msg, title);
+  } catch (e) {
+    FF.Menu.alert('Ошибка: ' + e.message);
+  }
+}
+
+/** Меню → «Сбросить кеш парсера» */
+function menuResetCache() {
+  try {
+    FF.Parser.resetCache();
+    FF.Menu.toast('Кеш парсера сброшен', 'Cache', 3);
+  } catch (e) {
+    FF.Menu.alert('Ошибка: ' + e.message);
   }
 }
 
@@ -143,23 +189,20 @@ function menuAbout() {
 
 /** Ежедневный триггер (06:00) */
 function triggerDaily() {
-  FF.Debug.log('triggerDaily fired', 'INFO');
+  FF.Debug.log('INFO', 'main', 'triggerDaily fired');
   runAll();
 }
 
 /** Еженедельный триггер (понедельник) */
 function triggerWeekly() {
-  FF.Debug.log('triggerWeekly fired', 'INFO');
-  var cfg = FF.Config.load();
+  FF.Debug.log('INFO', 'main', 'triggerWeekly fired');
   runAll();
-  FF.Email.sendAll(cfg);
+  menuSendReports();
 }
 
 /** Ежемесячный триггер (1-е число) */
 function triggerMonthly() {
-  FF.Debug.log('triggerMonthly fired', 'INFO');
-  var cfg = FF.Config.load();
+  FF.Debug.log('INFO', 'main', 'triggerMonthly fired');
   runAll();
-  FF.Email.sendAll(cfg);
-  FF.Debug.writeHealthCheck(cfg);
+  menuSendReports();
 }

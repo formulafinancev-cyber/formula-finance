@@ -41,13 +41,14 @@ FF.Config = (function() {
     triggerDaily:   false,
     triggerWeekly:  false,
     triggerMonthly: false,
-    dashboardSheet: 'Dashboard',
-    logSheet:       'Log',
-    sourceBookIds:  [],
-    ceoEmails:      [],
-    cfoEmails:      [],
-    opsEmails:      [],
-    generalEmails:  []
+    dashboardSheet: '_FF_DASHBOARD',
+    logSheet:       '_FF_LOG',
+    sourceBookIds:   [],
+    restaurantNames: [],
+    ceoEmails:       [],
+    cfoEmails:       [],
+    opsEmails:       [],
+    generalEmails:   []
   };
 
   /**
@@ -94,7 +95,8 @@ FF.Config = (function() {
         dashboard: raw.dashboardSheet || DEFAULTS.dashboardSheet,
         log:       raw.logSheet       || DEFAULTS.logSheet
       },
-      sourceBookIds:  _csvArray(raw.sourceBookIds),
+      sourceBookIds:   _csvArray(raw.sourceBookIds),
+      restaurantNames: _csvArray(raw.restaurantNames),
       emails: {
         ceo:     _csvArray(raw.ceoEmails),
         cfo:     _csvArray(raw.cfoEmails),
@@ -158,9 +160,10 @@ FF.Config = (function() {
       ['currency',       '₽'],
       ['locale',         'ru'],
       ['timezone',       'Europe/Moscow'],
-      ['dashboardSheet', 'Dashboard'],
-      ['logSheet',       'Log'],
+      ['dashboardSheet', '_FF_DASHBOARD'],
+      ['logSheet',       '_FF_LOG'],
       ['sourceBookIds',  ''],
+      ['restaurantNames',''],
       ['ceoEmails',      ''],
       ['cfoEmails',      ''],
       ['opsEmails',      ''],

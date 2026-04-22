@@ -68,6 +68,42 @@ FF.Debug = (function() {
   }
 
   /**
+   * Build a compact text summary of the log sheet tail.
+   * Counts rows by level across the last `maxRows` entries and lists
+   * the most recent HealthCheck line if present.
+   * @param {Object} [config]
+   * @param {number} [maxRows=100]
+   * @returns {string}
+   */
+  function getCoverageReport(config, maxRows) {
+    var limit = maxRows || 100;
+    var sheet = getLogSheet(config);
+    var lastRow = sheet.getLastRow();
+    if (lastRow < 2) return 'Лог пуст. Запустите «Обновить дашборд», чтобы сгенерировать записи.';
+
+    var firstRow = Math.max(2, lastRow - limit + 1);
+    var rows = sheet.getRange(firstRow, 1, lastRow - firstRow + 1, 5).getValues();
+
+    var counts = { INFO: 0, WARN: 0, ERROR: 0 };
+    var lastHealth = null;
+    rows.forEach(function(r) {
+      var level = String(r[1] || '').toUpperCase();
+      if (counts[level] !== undefined) counts[level]++;
+      if (String(r[2]) === 'HealthCheck') lastHealth = r;
+    });
+
+    var lines = [];
+    lines.push('Записей в выборке: ' + rows.length + ' (последних из ' + (lastRow - 1) + ')');
+    lines.push('INFO: ' + counts.INFO + '  |  WARN: ' + counts.WARN + '  |  ERROR: ' + counts.ERROR);
+    if (lastHealth) {
+      lines.push('');
+      lines.push('Последний запуск: ' + lastHealth[0]);
+      lines.push(String(lastHealth[4] || ''));
+    }
+    return lines.join('\n');
+  }
+
+  /**
    * Clear all log entries (keep header row).
    * @param {Object} [config]
    */
@@ -112,6 +148,6 @@ FF.Debug = (function() {
     } catch(e) { /* swallow */ }
   }
 
-  return { log, writeHealthCheck, getLogSheet, clearLog };
+  return { log, writeHealthCheck, getLogSheet, getCoverageReport, clearLog };
 
 })();

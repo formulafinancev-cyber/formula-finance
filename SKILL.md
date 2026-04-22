@@ -42,7 +42,7 @@ automatically classifies all sheets, extracts metrics, and produces:
 When implementing code for this skill:
 
 1. All functions live under the `FF` global namespace
-2. Follow the module boundaries in `src/01-architecture.md`
+2. Follow the module boundaries in `docs/01-architecture.md`
 3. Every function must have try/catch with `FF.Debug.logError()` in catch
 4. Check `BlockDescriptor.isAvailable` before any rendering
 5. Use `FF.Utils.safeNumber()` for all cell value reads

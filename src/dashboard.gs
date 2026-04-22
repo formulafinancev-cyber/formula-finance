@@ -33,10 +33,19 @@ FF.Dashboard = (function() {
     writeHeader(sheet, config, blocks);
     applyLayout(sheet);
 
-    // Delegate KPI card rendering
-    FF.KPI.renderAll(sheet, blocks, classifiedSheets, config);
+    var restaurants = blocks.restaurants || [];
+    if (restaurants.length > 1) {
+      // Multi-unit: consolidated block first, then per-restaurant sections
+      FF.KPI.renderAll(sheet, blocks, classifiedSheets, config);
+      restaurants.forEach(function(r) {
+        var perSheets = classifiedSheets.filter(function(sd) { return sd.restaurantId === r.id; });
+        if (perSheets.length === 0) return;
+        FF.KPI.renderAll(sheet, blocks, perSheets, config, { sectionLabel: r.name });
+      });
+    } else {
+      FF.KPI.renderAll(sheet, blocks, classifiedSheets, config);
+    }
 
-    // Freeze header rows
     sheet.setFrozenRows(2);
 
     FF.Debug.log('INFO', 'Dashboard', 'renderAll complete');
@@ -50,8 +59,12 @@ FF.Dashboard = (function() {
    */
   function getSheet(config) {
     var ss        = SpreadsheetApp.getActiveSpreadsheet();
-    var sheetName = (config && config.sheets && config.sheets.dashboard) || 'Dashboard';
-    var sheet     = ss.getSheetByName(sheetName);
+    var sheetName = (config && config.sheets && config.sheets.dashboard) || '_FF_DASHBOARD';
+    if (sheetName.indexOf('_FF_') !== 0) {
+      FF.Debug.log('WARN', 'Dashboard',
+        'Dashboard sheet name "' + sheetName + '" does not start with _FF_ prefix (SKILL.md §Usage #7)');
+    }
+    var sheet = ss.getSheetByName(sheetName);
     if (!sheet) {
       sheet = ss.insertSheet(sheetName, 0); // insert as first sheet
       FF.Debug.log('INFO', 'Dashboard', 'Created sheet: ' + sheetName);

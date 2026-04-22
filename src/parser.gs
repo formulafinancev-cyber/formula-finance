@@ -26,25 +26,72 @@ FF.Parser = (function() {
   var SKIP_SHEETS = [
     'Sheet1', 'Служебный', 'Темп', 'DEBUG', 'Log', 'Dashboard'
   ];
-  var SKIP_PREFIX = '_FF_';
+  var SKIP_PREFIX   = '_FF_';
+  var CACHE_TTL_SEC = 300;     // per master prompt
+  var CACHE_MAX_BYTES = 95000; // CacheService per-key limit is 100 KB; leave headroom
 
   /**
    * Read all source workbooks defined in config.
+   * Caches the parsed output in CacheService for up to CACHE_TTL_SEC seconds.
+   * Cache is invalidated if any source book's lastUpdated timestamp is newer
+   * than the cache entry, or if sourceBookIds changes.
    * @param {Object} config - loaded FF.Config object
    * @returns {Array} Array of SheetData objects
    */
   function readBook(config) {
-    var result = [];
-    var bookIds = config.sourceBookIds || [];
+    var bookIds = (config.sourceBookIds && config.sourceBookIds.length > 0)
+      ? config.sourceBookIds
+      : [SpreadsheetApp.getActiveSpreadsheet().getId()];
 
-    // If no external books configured, read the active spreadsheet
-    if (bookIds.length === 0) {
-      bookIds = [SpreadsheetApp.getActiveSpreadsheet().getId()];
+    var restaurantNames = (config.restaurantNames && config.restaurantNames.length > 0)
+      ? config.restaurantNames
+      : [];
+
+    var cacheKey = _cacheKey(bookIds);
+    var cache    = _tryGetCache();
+    if (cache) {
+      var hit = _readCache(cache, cacheKey, bookIds);
+      if (hit) {
+        FF.Debug.log('INFO', 'Parser', 'Cache HIT — returning ' + hit.length + ' sheets from cache');
+        return hit;
+      }
     }
 
-    bookIds.forEach(function(bookId) {
+    var result = _readBookUncached(bookIds, restaurantNames);
+
+    if (cache) _writeCache(cache, cacheKey, result);
+
+    FF.Debug.log('INFO', 'Parser', 'Total SheetData objects: ' + result.length);
+    return result;
+  }
+
+  /**
+   * Remove the parser's cache entry (all variants of bookIds keyed under
+   * this script are dropped because we cannot enumerate keys — we clear
+   * the whole script cache's known prefix via ScriptProperties fingerprint).
+   * Safe to call from a menu item.
+   */
+  function resetCache() {
+    var cache = _tryGetCache();
+    if (!cache) return;
+    var props   = PropertiesService.getScriptProperties();
+    var lastKey = props.getProperty('FF_parser_lastKey');
+    if (lastKey) cache.remove(lastKey);
+    FF.Debug.log('INFO', 'Parser', 'Parser cache reset');
+  }
+
+  /**
+   * Actual read loop (no caching). Extracted so the cache layer can wrap it.
+   * @param {string[]} bookIds
+   * @param {string[]} restaurantNames - parallel to bookIds, may be shorter
+   * @returns {Array}
+   */
+  function _readBookUncached(bookIds, restaurantNames) {
+    var result = [];
+    bookIds.forEach(function(bookId, idx) {
       bookId = String(bookId).trim();
       if (!bookId) return;
+      var restaurantName = restaurantNames[idx] || '';
       try {
         var ss       = SpreadsheetApp.openById(bookId);
         var bookName = ss.getName();
@@ -53,15 +100,69 @@ FF.Parser = (function() {
 
         sheets.forEach(function(sheet) {
           var sheetData = _readSheet(sheet, bookId, bookName);
-          if (sheetData) result.push(sheetData);
+          if (sheetData) {
+            sheetData.restaurantId   = bookId;
+            sheetData.restaurantName = restaurantName || bookName;
+            result.push(sheetData);
+          }
         });
       } catch(e) {
         FF.Debug.log('ERROR', 'Parser', 'Cannot open book: ' + bookId, e.message);
       }
     });
-
-    FF.Debug.log('INFO', 'Parser', 'Total SheetData objects: ' + result.length);
     return result;
+  }
+
+  // --- cache helpers ---
+
+  function _tryGetCache() {
+    try { return CacheService.getScriptCache(); }
+    catch (e) { return null; }
+  }
+
+  function _cacheKey(bookIds) {
+    var joined = bookIds.slice().sort().join(',');
+    var digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, joined);
+    return 'FF_parser_' + Utilities.base64EncodeWebSafe(digest);
+  }
+
+  function _readCache(cache, key, bookIds) {
+    var raw = cache.get(key);
+    if (!raw) return null;
+    var entry;
+    try { entry = JSON.parse(raw); }
+    catch (e) { return null; }
+    if (!entry || !entry.ts || !Array.isArray(entry.data)) return null;
+
+    // Invalidate if any source book has been edited since cache write
+    for (var i = 0; i < bookIds.length; i++) {
+      try {
+        var lastUpdated = SpreadsheetApp.openById(bookIds[i]).getLastUpdated().getTime();
+        if (lastUpdated > entry.ts) {
+          FF.Debug.log('INFO', 'Parser', 'Cache stale — book edited after write');
+          return null;
+        }
+      } catch (e) {
+        // If we cannot verify, prefer a fresh read
+        return null;
+      }
+    }
+    return entry.data;
+  }
+
+  function _writeCache(cache, key, data) {
+    try {
+      var payload = JSON.stringify({ ts: Date.now(), data: data });
+      if (payload.length > CACHE_MAX_BYTES) {
+        FF.Debug.log('WARN', 'Parser',
+          'Skipping cache — payload ' + payload.length + 'B exceeds ' + CACHE_MAX_BYTES + 'B limit');
+        return;
+      }
+      cache.put(key, payload, CACHE_TTL_SEC);
+      PropertiesService.getScriptProperties().setProperty('FF_parser_lastKey', key);
+    } catch (e) {
+      FF.Debug.log('WARN', 'Parser', 'Cache write failed: ' + e.message);
+    }
   }
 
   /**
@@ -208,6 +309,6 @@ FF.Parser = (function() {
     return SKIP_SHEETS.indexOf(sheetName) >= 0;
   }
 
-  return { readBook };
+  return { readBook, resetCache };
 
 })();
