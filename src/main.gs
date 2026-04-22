@@ -15,99 +15,151 @@
 
 'use strict';
 
-// Global namespace
 var FF = FF || {};
 
+/* ─────────────────────────────────────────────
+   LIFECYCLE
+───────────────────────────────────────────── */
+
 /**
- * onOpen trigger — called when spreadsheet is opened.
- * Builds the custom 🧮 Formula Finance menu.
+ * onOpen() — вызывается автоматически при открытии таблицы.
+ * Строит пользовательское меню через FF.Menu.
  */
 function onOpen() {
-  // TODO: implement
-  // FF.Menu.build();
+  try {
+    FF.Menu.build();
+  } catch (e) {
+    Logger.log('onOpen error: ' + e.message);
+  }
 }
 
+/* ─────────────────────────────────────────────
+   PIPELINE
+───────────────────────────────────────────── */
+
 /**
- * Main orchestrator — runs the full pipeline:
- * 1. Read config from _FF_CONFIG sheet
- * 2. Parse all source workbooks
- * 3. Classify all sheets
- * 4. Build block registry
- * 5. Render all dashboards
- * 6. Refresh KPI cards
- * 7. Write Debug/health-check sheet
+ * runAll() — полный конвейер обновления.
+ * Config -> Parse -> Classify -> Registry -> KPI -> Dashboard -> Debug
  */
 function runAll() {
-  // TODO: implement full pipeline
-  // const config = FF.Config.load();
-  // const parsedBooks = config.sourceIds.map(id => FF.Parser.readBook(id));
-  // const classified = parsedBooks.flatMap(b => b.sheets.map(s => FF.Classifier.classify(s)));
-  // const blocks = FF.Registry.buildAvailableBlocks(classified);
-  // FF.Dashboard.renderAll(blocks);
-  // FF.KPI.renderAll(blocks);
-  // FF.Debug.writeHealthCheck(classified, blocks);
+  var cfg = FF.Config.load();
+  FF.Debug.log('runAll started', 'INFO');
+
+  try {
+    // 1. Парсинг книги
+    var raw = FF.Parser.readBook(cfg);
+    FF.Debug.log('Parser: ' + raw.length + ' sheets', 'INFO');
+
+    // 2. Классификация строк
+    var rows = FF.Classifier.classifyAll(raw, cfg);
+    FF.Debug.log('Classifier: ' + rows.length + ' rows', 'INFO');
+
+    // 3. Реестр операций
+    FF.Registry.build(rows, cfg);
+    FF.Debug.log('Registry: built', 'INFO');
+
+    // 4. KPI
+    FF.KPI.renderAll(cfg);
+    FF.Debug.log('KPI: rendered', 'INFO');
+
+    // 5. Дашборды
+    FF.Dashboard.renderAll(cfg);
+    FF.Debug.log('Dashboard: rendered', 'INFO');
+
+    // 6. Health-check
+    FF.Debug.writeHealthCheck(cfg);
+
+    FF.Menu.toast('Formula Finance обновлён', 'OK', 4);
+  } catch (e) {
+    FF.Debug.log('runAll FATAL: ' + e.message, 'ERROR');
+    FF.Menu.alert('Ошибка обновления', e.message);
+    throw e;
+  }
 }
 
-/**
- * Entry point for menu item "Обновить дашборд"
- */
+/* ─────────────────────────────────────────────
+   MENU HANDLERS
+───────────────────────────────────────────── */
+
+/** Меню → «Обновить дашборд» */
 function menuUpdateAll() {
-  // TODO: implement
-  // runAll();
+  var confirmed = FF.Menu.confirm(
+    'Обновить дашборд?',
+    'Запустить полный пересчёт данных?'
+  );
+  if (confirmed) runAll();
 }
 
-/**
- * Entry point for menu item "Разослать отчёты"
- */
+/** Меню → «Разослать отчёты» */
 function menuSendReports() {
-  // TODO: implement
-  // FF.Email.sendAll(FF.Config.load());
+  var cfg = FF.Config.load();
+  try {
+    FF.Email.sendAll(cfg);
+    FF.Menu.toast('Отчёты отправлены', 'Email', 4);
+  } catch (e) {
+    FF.Debug.log('menuSendReports error: ' + e.message, 'ERROR');
+    FF.Menu.alert('Ошибка рассылки', e.message);
+  }
 }
 
-/**
- * Entry point for menu item "Настройки"
- */
+/** Меню → «Настройки» */
 function menuOpenSettings() {
-  // TODO: implement
-  // FF.Config.openSettingsUI();
+  var cfg = FF.Config.load();
+  var ui = SpreadsheetApp.getUi();
+  var result = ui.prompt(
+    'Настройки',
+    'Введите имя листа с данными (текущий: ' + cfg.dataSheetName + '):',
+    ui.ButtonSet.OK_CANCEL
+  );
+  if (result.getSelectedButton() === ui.Button.OK) {
+    var newSheet = result.getResponseText().trim();
+    if (newSheet) {
+      cfg.dataSheetName = newSheet;
+      FF.Config.save(cfg);
+      FF.Menu.toast('Настройки сохранены', 'Config', 3);
+    }
+  }
 }
 
-/**
- * Entry point for menu item "Лог покрытия"
- */
+/** Меню → «Лог покрытия» */
 function menuOpenCoverageLog() {
-  // TODO: implement
-  // FF.Debug.openCoverageLog();
+  var cfg = FF.Config.load();
+  try {
+    var report = FF.Debug.getCoverageReport(cfg);
+    FF.Menu.alert('Лог покрытия', report);
+  } catch (e) {
+    FF.Menu.alert('Ошибка', e.message);
+  }
 }
 
-/**
- * Entry point for menu item "О продукте"
- */
+/** Меню → «О продукте» */
 function menuAbout() {
-  // TODO: implement
-  // FF.Menu.showAbout();
+  FF.Menu.showAbout();
 }
 
-/**
- * Entry point for daily trigger
- */
+/* ─────────────────────────────────────────────
+   TRIGGERS
+───────────────────────────────────────────── */
+
+/** Ежедневный триггер (06:00) */
 function triggerDaily() {
-  // TODO: implement
-  // runAll();
-  // FF.Email.sendRole('CEO', ...);
-  // FF.Email.sendRole('CFO', ...);
+  FF.Debug.log('triggerDaily fired', 'INFO');
+  runAll();
 }
 
-/**
- * Entry point for weekly trigger
- */
+/** Еженедельный триггер (понедельник) */
 function triggerWeekly() {
-  // TODO: implement
+  FF.Debug.log('triggerWeekly fired', 'INFO');
+  var cfg = FF.Config.load();
+  runAll();
+  FF.Email.sendAll(cfg);
 }
 
-/**
- * Entry point for monthly trigger
- */
+/** Ежемесячный триггер (1-е число) */
 function triggerMonthly() {
-  // TODO: implement
+  FF.Debug.log('triggerMonthly fired', 'INFO');
+  var cfg = FF.Config.load();
+  runAll();
+  FF.Email.sendAll(cfg);
+  FF.Debug.writeHealthCheck(cfg);
 }
