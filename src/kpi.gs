@@ -29,21 +29,40 @@ FF.KPI = (function() {
     sectionBg:   '#0f3460'
   };
 
+  // State for multi-unit rendering: next available row across sequential sections
+  var _nextRow = 3;
+
   /**
    * Render all available KPI cards onto the dashboard sheet.
    * @param {GoogleAppsScript.Spreadsheet.Sheet} sheet - dashboard sheet
    * @param {Array} blocks - available blocks from FF.Registry
    * @param {Array} classifiedSheets - from FF.Classifier
    * @param {Object} config
+   * @param {Object} [opts] - { sectionLabel: string } for per-restaurant sections
    */
-  function renderAll(sheet, blocks, classifiedSheets, config) {
+  function renderAll(sheet, blocks, classifiedSheets, config, opts) {
     var available = blocks.filter(function(b) { return b.isAvailable; });
-    FF.Debug.log('INFO', 'KPI', 'Rendering ' + available.length + ' KPI blocks');
+    var label     = opts && opts.sectionLabel;
+    FF.Debug.log('INFO', 'KPI',
+      'Rendering ' + available.length + ' KPI blocks' + (label ? ' [' + label + ']' : ''));
 
-    var row = 3; // start row (rows 1-2 are used by dashboard header)
+    // Reset row cursor on the main (consolidated) render; reuse for per-restaurant sections
+    if (!label) _nextRow = 3;
+
+    if (label) {
+      var hdr = sheet.getRange(_nextRow, 1, 1, 10);
+      hdr.merge();
+      hdr.setValue('🏢 ' + label);
+      hdr.setBackground(COLOURS.headerBg);
+      hdr.setFontColor(COLOURS.headerFg);
+      hdr.setFontWeight('bold');
+      hdr.setFontSize(12);
+      _nextRow += 1;
+    }
+
     available.forEach(function(block) {
-      row = renderBlock(sheet, block, classifiedSheets, config, row);
-      row += 1; // gap between blocks
+      _nextRow = renderBlock(sheet, block, classifiedSheets, config, _nextRow);
+      _nextRow += 1; // gap between blocks
     });
   }
 
@@ -139,39 +158,117 @@ FF.KPI = (function() {
     block.requiredTypes.forEach(function(rt) {
       var sheets = classifiedSheets.filter(function(sd) { return sd.reportType === rt; });
       if (sheets.length === 0) return;
-      var sd = sheets[0]; // use most recent
 
       switch(block.id) {
         case 'revenue_daily':
-          metrics.push({ label: 'Выручка',       value: _sumColumn(sd.rows, _findRevenueCol(sd.headers)), format: 'currency', delta: null });
-          metrics.push({ label: 'Средний чек',    value: _avgColumn(sd.rows,  _findCheckCol(sd.headers)),   format: 'currency', delta: null });
-          metrics.push({ label: 'Гостей',        value: _countRows(sd.rows),                                   format: 'number',   delta: null });
+          var revenueSum = 0;
+          var guestsSum  = 0;
+          sheets.forEach(function(sd) {
+            var r = _sumColumn(sd.rows, _findRevenueCol(sd.headers));
+            var g = _sumColumn(sd.rows, _findGuestsCol(sd.headers));
+            if (r !== null) revenueSum += r;
+            // fallback: row count as proxy for guest/cheque count if column missing
+            guestsSum += (g !== null ? g : _countRows(sd.rows));
+          });
+          var avgCheck = guestsSum > 0 ? Math.round(revenueSum / guestsSum) : null;
+          metrics.push({ label: 'Выручка',     value: revenueSum || null, format: 'currency', delta: null });
+          metrics.push({ label: 'Средний чек', value: avgCheck,            format: 'currency', delta: null });
+          metrics.push({ label: 'Гостей',      value: guestsSum || null,   format: 'number',   delta: null });
           break;
+
+        case 'forecast_revenue':
+          if (!FF.Forecast) {
+            metrics.push({ label: 'Прогноз', value: 'N/A', format: 'text', delta: null });
+            break;
+          }
+          var series = FF.Forecast.extractRevenueSeries(sheets);
+          if (!FF.Forecast.isEnoughData(series)) {
+            metrics.push({
+              label:  'Прогноз выручки',
+              value:  'Нужно ≥' + FF.Forecast.MIN_POINTS + ' точек (есть ' + series.length + ')',
+              format: 'text',
+              delta:  null
+            });
+            break;
+          }
+          var fc = FF.Forecast.predictRevenue(series, 7);
+          if (!fc) {
+            metrics.push({ label: 'Прогноз выручки', value: 'Ошибка расчёта', format: 'text', delta: null });
+            break;
+          }
+          var forecastTotal = fc.forecast.reduce(function(s, p) { return s + p.value; }, 0);
+          var confidencePct = Math.round(Math.max(0, fc.r2) * 100);
+          metrics.push({ label: 'Прогноз на 7 дн.',   value: forecastTotal, format: 'currency', delta: null });
+          metrics.push({ label: 'Точность (R²)',      value: confidencePct, format: 'percent',  delta: null });
+          return; // forecast_revenue produces exactly these two cards — skip generic fallthrough
+
         case 'top_dishes':
-          var topDishes = _topN(sd.rows, _findRevenueCol(sd.headers), _findNameCol(sd.headers), 5);
-          topDishes.forEach(function(d) {
-            metrics.push({ label: d.name, value: d.value, format: 'currency', delta: null });
+          // Aggregate top dishes across all matching sheets
+          var agg = {};
+          sheets.forEach(function(sd) {
+            var valueCol = _findRevenueCol(sd.headers);
+            var nameCol  = _findNameCol(sd.headers);
+            if (!valueCol || !nameCol) return;
+            sd.rows.forEach(function(row) {
+              var name = row[nameCol];
+              var val  = row[valueCol];
+              if (!name || typeof val !== 'number') return;
+              agg[name] = (agg[name] || 0) + val;
+            });
+          });
+          Object.keys(agg).sort(function(a, b) { return agg[b] - agg[a]; }).slice(0, 5).forEach(function(name) {
+            metrics.push({ label: name, value: agg[name], format: 'currency', delta: null });
           });
           break;
+
         default:
-          // Generic: sum all numeric columns
-          sd.headers.slice(0, 3).forEach(function(h) {
-            var sum = _sumColumn(sd.rows, h);
-            if (sum !== null) metrics.push({ label: h, value: sum, format: 'number', delta: null });
+          // Generic: sum the first 3 headers across all sheets of this type
+          var unionHeaders = _unionHeaders(sheets).slice(0, 3);
+          unionHeaders.forEach(function(h) {
+            var total = 0;
+            var seen  = false;
+            sheets.forEach(function(sd) {
+              var s = _sumColumn(sd.rows, h);
+              if (s !== null) { total += s; seen = true; }
+            });
+            if (seen) metrics.push({ label: h, value: total, format: 'number', delta: null });
           });
       }
     });
     return metrics.length > 0 ? metrics : [{ label: block.label, value: 'N/A', format: 'text', delta: null }];
   }
 
+  function _unionHeaders(sheets) {
+    var seen = {};
+    var out  = [];
+    sheets.forEach(function(sd) {
+      (sd.headers || []).forEach(function(h) {
+        if (h && !seen[h]) { seen[h] = true; out.push(h); }
+      });
+    });
+    return out;
+  }
+
   // --- Column finders ---
   var REVENUE_ALIASES = ['выручка', 'сумма', 'итог', 'revenue', 'total', 'цена', 'сум'];
   var CHECK_ALIASES   = ['средний', 'avg', 'average', 'чек'];
   var NAME_ALIASES    = ['название', 'блюдо', 'номенклатура', 'name', 'dish'];
+  var GUESTS_ALIASES  = ['гост', 'чеки', 'посетит', 'covers', 'guests', 'customers', 'кол-во чеков'];
 
   function _findRevenueCol(headers) { return _findCol(headers, REVENUE_ALIASES); }
   function _findCheckCol(headers)   { return _findCol(headers, CHECK_ALIASES); }
   function _findNameCol(headers)    { return _findCol(headers, NAME_ALIASES); }
+  function _findGuestsCol(headers)  { return _findColStrict(headers, GUESTS_ALIASES); }
+
+  function _findColStrict(headers, aliases) {
+    var lower = (headers || []).map(function(h) { return String(h).toLowerCase(); });
+    for (var i = 0; i < aliases.length; i++) {
+      for (var j = 0; j < lower.length; j++) {
+        if (lower[j].indexOf(aliases[i]) >= 0) return headers[j];
+      }
+    }
+    return null;
+  }
 
   function _findCol(headers, aliases) {
     var lower = headers.map(function(h) { return String(h).toLowerCase(); });

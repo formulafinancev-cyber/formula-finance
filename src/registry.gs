@@ -93,6 +93,13 @@ FF.Registry = (function() {
       category: 'loyalty',
       requiredTypes: ['LOYALTY'],
       metrics: ['new_guests', 'returning_guests', 'loyalty_revenue_share']
+    },
+    {
+      id: 'forecast_revenue',
+      label: 'Прогноз выручки',
+      category: 'forecast',
+      requiredTypes: ['SALES_SUMMARY'],
+      metrics: ['forecast_next_week', 'forecast_confidence']
     }
   ];
 
@@ -102,12 +109,17 @@ FF.Registry = (function() {
    * @returns {Array} Array of BlockDescriptor with isAvailable flag
    */
   function buildAvailableBlocks(classifiedSheets) {
-    // Collect all present report types
-    var presentTypes = {};
+    // Collect present report types — globally and per restaurant
+    var presentTypes   = {};
+    var perRestaurant  = {};  // restaurantId → Set<reportType>
     classifiedSheets.forEach(function(sd) {
-      if (sd.reportType && sd.reportType !== 'UNKNOWN') {
-        presentTypes[sd.reportType] = true;
+      if (!sd.reportType || sd.reportType === 'UNKNOWN') return;
+      presentTypes[sd.reportType] = true;
+      var rid = sd.restaurantId || '__all__';
+      if (!perRestaurant[rid]) {
+        perRestaurant[rid] = { name: sd.restaurantName || rid, types: {} };
       }
+      perRestaurant[rid].types[sd.reportType] = true;
     });
 
     var available = 0;
@@ -115,19 +127,36 @@ FF.Registry = (function() {
       var isAvailable = block.requiredTypes.every(function(rt) {
         return !!presentTypes[rt];
       });
+
+      // Per-restaurant availability map for this block
+      var perRestaurantAvailable = {};
+      Object.keys(perRestaurant).forEach(function(rid) {
+        var types = perRestaurant[rid].types;
+        perRestaurantAvailable[rid] = block.requiredTypes.every(function(rt) {
+          return !!types[rt];
+        });
+      });
+
       if (isAvailable) available++;
       return {
-        id:            block.id,
-        label:         block.label,
-        category:      block.category,
-        requiredTypes: block.requiredTypes,
-        metrics:       block.metrics,
-        isAvailable:   isAvailable
+        id:                    block.id,
+        label:                 block.label,
+        category:              block.category,
+        requiredTypes:         block.requiredTypes,
+        metrics:               block.metrics,
+        isAvailable:           isAvailable,
+        perRestaurantAvailable:perRestaurantAvailable
       };
+    });
+
+    // Attach restaurants roster (id → name) for downstream consumers
+    blocks.restaurants = Object.keys(perRestaurant).map(function(rid) {
+      return { id: rid, name: perRestaurant[rid].name };
     });
 
     FF.Debug.log('INFO', 'Registry',
       'Blocks available: ' + available + '/' + blocks.length +
+      ' | Restaurants: ' + blocks.restaurants.length +
       ' | Present types: ' + Object.keys(presentTypes).join(', '));
 
     return blocks;
